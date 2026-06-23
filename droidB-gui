@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+# droidB-gui — ARXOS Android toolkit GUI (GTK3). Front-end to droidB.
+import gi, subprocess
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk, GLib
+
+BG = "/usr/share/droidB/recovery.png"
+CSS = ("""
+window { background-image: url('%s'); background-size: cover; background-position: center; background-color:#070d0a; }
+.title { font-weight:800; font-size:25px; color:#eafff2; }
+.sub   { color:#9fc1b1; font-size:10px; }
+.stat  { color:#cfe9da; font-size:12px; }
+.stat.on { color:#3ddc84; font-weight:700; }
+.stat.off{ color:#7d8a83; }
+.panel { background:rgba(5,11,8,0.62); border-radius:16px; }
+.card  { background:rgba(8,16,11,0.74); border:1px solid rgba(61,220,132,0.28); border-radius:12px; }
+.card:hover { background:rgba(61,220,132,0.15); border:1px solid rgba(61,220,132,0.72); }
+.cardt { color:#eafff2; font-size:12px; font-weight:600; }
+button.card { padding:0; }
+""" % BG).encode()
+
+def sh(c):
+    try: return subprocess.check_output(c, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception: return ""
+
+def term(cmd):
+    for t in ("konsole","xfce4-terminal","x-terminal-emulator","alacritty","xterm"):
+        if sh("command -v "+t):
+            f = "-x" if t == "xfce4-terminal" else "-e"
+            try: subprocess.Popen([t, f, "bash","-lc",cmd]); return
+            except Exception: pass
+
+class DroidB(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="droidB — Android Toolkit")
+        self.set_default_size(760, 600); self.set_resizable(False)
+        try: self.set_icon_from_file("/usr/share/droidB/droidB.png")
+        except Exception: pass
+        p = Gtk.CssProvider(); p.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_USER)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.set_halign(Gtk.Align.END); outer.set_valign(Gtk.Align.FILL)
+        self.add(outer)
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        panel.get_style_context().add_class("panel")
+        for m in ("set_margin_top","set_margin_bottom","set_margin_start","set_margin_end"): getattr(panel, m)(20)
+        panel.set_size_request(372, -1); panel.set_valign(Gtk.Align.FILL)
+        outer.pack_start(panel, True, True, 0)
+
+        t = Gtk.Label(); t.set_markup("<span font='25' weight='800'>droid<span foreground='#3ddc84'>B</span></span>")
+        t.set_xalign(0); t.get_style_context().add_class("title"); panel.pack_start(t, False, False, 0)
+        s = Gtk.Label(label="ANDROID TOOLKIT  ·  ADB / FASTBOOT / FRIDA"); s.set_xalign(0)
+        s.get_style_context().add_class("sub"); panel.pack_start(s, False, False, 0)
+
+        self.dev = Gtk.Label(label="○ scanning for device…"); self.dev.set_xalign(0)
+        self.dev.get_style_context().add_class("stat"); self.dev.set_margin_top(6)
+        panel.pack_start(self.dev, False, False, 0)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=10, column_homogeneous=True, row_homogeneous=True)
+        grid.set_margin_top(10); panel.pack_start(grid, True, True, 0)
+        cards = [
+            ("dialog-information","Device Info", self.devinfo),
+            ("user-trash","Debloater",     lambda *_: term("droidB")),
+            ("system-software-install","Apps", lambda *_: term("droidB")),
+            ("folder","Files",             lambda *_: term("droidB")),
+            ("drive-harddisk","Backup",    lambda *_: term("droidB")),
+            ("applications-engineering","Fastboot", lambda *_: term("droidB")),
+            ("phone","Samsung",            lambda *_: term("droidB")),
+            ("security-high","Security",   lambda *_: term("droidB")),
+            ("document-send","Install APK",self.installapk),
+        ]
+        for i,(ic,ti,cb) in enumerate(cards):
+            b = self._card(ic, ti); b.connect("clicked", cb); grid.attach(b, i % 3, i // 3, 1, 1)
+
+        big = Gtk.Button(label="  Open full toolkit  "); big.get_style_context().add_class("card")
+        big.connect("clicked", lambda *_: term("droidB")); big.set_margin_top(4)
+        panel.pack_start(big, False, False, 0)
+
+        self.refresh(); GLib.timeout_add_seconds(3, self.refresh)
+
+    def _card(self, icon, title):
+        b = Gtk.Button(); b.get_style_context().add_class("card")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        box.set_margin_top(13); box.set_margin_bottom(13)
+        img = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DND); img.set_pixel_size(24)
+        l = Gtk.Label(label=title); l.get_style_context().add_class("cardt")
+        box.pack_start(img, False, False, 0); box.pack_start(l, False, False, 0)
+        b.add(box); return b
+
+    def _adb(self): return sh("adb get-state 2>/dev/null")
+
+    def devinfo(self, *_):
+        if self._adb() != "device":
+            self._msg("No device", "Connect a device with USB debugging enabled."); return
+        info = sh("printf 'Model:   %s\\nBrand:   %s\\nAndroid: %s (API %s)\\nSerial:  %s\\nPatch:   %s' "
+                  "\"$(adb shell getprop ro.product.model)\" \"$(adb shell getprop ro.product.brand)\" "
+                  "\"$(adb shell getprop ro.build.version.release)\" \"$(adb shell getprop ro.build.version.sdk)\" "
+                  "\"$(adb get-serialno)\" \"$(adb shell getprop ro.build.version.security_patch)\"")
+        self._msg("Device", info or "could not read device")
+
+    def installapk(self, *_):
+        if self._adb() != "device":
+            self._msg("No device", "Connect a device first."); return
+        d = Gtk.FileChooserDialog(title="Select APK", parent=self, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, "Install", Gtk.ResponseType.OK)
+        f = Gtk.FileFilter(); f.set_name("APK"); f.add_pattern("*.apk"); d.add_filter(f)
+        if d.run() == Gtk.ResponseType.OK:
+            apk = d.get_filename(); d.destroy()
+            term("echo 'Installing %s'; adb install -r '%s'; echo; read -rp 'enter…'" % (apk, apk))
+        else: d.destroy()
+
+    def _msg(self, title, body):
+        m = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.INFO,
+                              buttons=Gtk.ButtonsType.OK, text=title)
+        m.format_secondary_text(body); m.run(); m.destroy()
+
+    def refresh(self):
+        st = self._adb(); c = self.dev.get_style_context()
+        c.remove_class("on"); c.remove_class("off")
+        if st == "device":
+            model = sh("adb shell getprop ro.product.model") or "device"
+            rel = sh("adb shell getprop ro.build.version.release")
+            self.dev.set_text("● %s  ·  Android %s" % (model, rel)); c.add_class("on")
+        else:
+            self.dev.set_text("○ no device connected"); c.add_class("off")
+        return True
+
+if __name__ == "__main__":
+    w = DroidB(); w.connect("destroy", Gtk.main_quit); w.show_all(); Gtk.main()
