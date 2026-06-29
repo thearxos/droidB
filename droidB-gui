@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # droidB-gui — ARXOS Android toolkit GUI (GTK3). Front-end to droidB.
-import gi, subprocess
+import gi, subprocess, sys
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GLib
+
+VERSION = "0.0.1"   # ARXOS: every tool pinned to 0.0.1
 
 BG = "/usr/share/droidB/recovery.png"
 CSS = ("""
@@ -50,7 +52,7 @@ class DroidB(Gtk.Window):
 
         t = Gtk.Label(); t.set_markup("<span font='25' weight='800'>droid<span foreground='#3ddc84'>B</span></span>")
         t.set_xalign(0); t.get_style_context().add_class("title"); panel.pack_start(t, False, False, 0)
-        s = Gtk.Label(label="ANDROID TOOLKIT  ·  ADB / FASTBOOT / FRIDA"); s.set_xalign(0)
+        s = Gtk.Label(label="ANDROID TOOLKIT  ·  ADB / FASTBOOT / FRIDA  ·  v" + VERSION); s.set_xalign(0)
         s.get_style_context().add_class("sub"); panel.pack_start(s, False, False, 0)
 
         self.dev = Gtk.Label(label="○ scanning for device…"); self.dev.set_xalign(0)
@@ -127,4 +129,6 @@ class DroidB(Gtk.Window):
         return True
 
 if __name__ == "__main__":
+    if "--version" in sys.argv or "-V" in sys.argv:
+        print("droidB-gui %s (ARXOS)" % VERSION); sys.exit(0)
     w = DroidB(); w.connect("destroy", Gtk.main_quit); w.show_all(); Gtk.main()
