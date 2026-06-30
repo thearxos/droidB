@@ -29,6 +29,11 @@ button.danger:hover { background:rgba(255,90,90,0.18); border-color:#ff5a5a; }
 entry, .term { background:#050506; color:#c9c9d0; border:1px solid rgba(232,112,42,0.22); border-radius:8px; }
 .term { font-family:monospace; font-size:11px; padding:6px; }
 .mono { font-family:monospace; font-size:12px; color:#c9c9d0; }
+.fcard { background:rgba(255,255,255,0.03); border:1px solid rgba(232,112,42,0.20); border-radius:14px; padding:14px; }
+.fcard-t { color:#ffffff; font-size:13px; font-weight:700; }
+.fcard-s { color:#8a8a92; font-size:10px; }
+.chip { background:rgba(232,112,42,0.18); color:%(g)s; border-radius:999px; padding:2px 11px; font-size:10px; font-weight:700; }
+.slotlbl { color:#b6b6bf; font-size:11px; font-weight:600; }
 """ % {"g": AC}).encode()
 
 
@@ -142,6 +147,17 @@ class DroidB(Gtk.Window):
     def _scroller(self, child):
         s = Gtk.ScrolledWindow(); s.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         s.add(child); return s
+
+    def _section(self, title, sub, chip=None):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8); box.get_style_context().add_class("fcard")
+        head = Gtk.Box(spacing=8)
+        t = Gtk.Label(label=title); t.set_xalign(0); t.get_style_context().add_class("fcard-t"); head.pack_start(t, False, False, 0)
+        if chip:
+            c = Gtk.Label(label=chip); c.get_style_context().add_class("chip"); c.set_valign(Gtk.Align.CENTER); head.pack_end(c, False, False, 0)
+        box.pack_start(head, False, False, 0)
+        if sub:
+            s = Gtk.Label(label=sub); s.set_xalign(0); s.get_style_context().add_class("fcard-s"); box.pack_start(s, False, False, 0)
+        return box
 
     def _run_async(self, fn, done=None):
         def work():
@@ -297,41 +313,163 @@ class DroidB(Gtk.Window):
         return False
 
     def _p_files(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.pack_start(self._hdr("Files", "push to / pull from the device"), False, False, 0)
-        r1 = Gtk.Box(spacing=8)
-        r1.pack_start(Gtk.Label(label="Remote path"), False, False, 0)
-        self.f_remote = Gtk.Entry(); self.f_remote.set_text("/sdcard/")
-        r1.pack_start(self.f_remote, True, True, 0)
-        box.pack_start(r1, False, False, 0)
-        r2 = Gtk.Box(spacing=8)
-        r2.pack_start(self._act("Push file…", self._push), False, False, 0)
-        r2.pack_start(self._act("Pull to…", self._pull), False, False, 0)
-        r2.pack_start(self._act("List", lambda *_: self._run_async(
-            lambda: adb("shell", "ls", "-la", self.f_remote.get_text(), timeout=10), self.f_out.set_text)), False, False, 0)
-        box.pack_start(r2, False, False, 0)
-        self.f_out = Gtk.Label(label=""); self.f_out.set_xalign(0); self.f_out.get_style_context().add_class("mono")
-        self.f_out.set_selectable(True)
-        box.pack_start(self._scroller(self.f_out), True, True, 0)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.pack_start(self._hdr("Files", "live device browser - navigate, pull/push per file or folder, concurrent + batch"), False, False, 0)
+        nav = Gtk.Box(spacing=6)
+        nav.pack_start(self._act("Home", lambda *_: self._fb_go("/sdcard/")), False, False, 0)
+        nav.pack_start(self._act("Up", lambda *_: self._fb_up()), False, False, 0)
+        self.f_path = Gtk.Entry(); self.f_path.set_text("/sdcard/"); self.f_path.set_hexpand(True)
+        self.f_path.connect("activate", lambda *_: self._fb_go(self.f_path.get_text()))
+        nav.pack_start(self.f_path, True, True, 0)
+        nav.pack_start(self._act("Go", lambda *_: self._fb_go(self.f_path.get_text())), False, False, 0)
+        nav.pack_start(self._act("Reload", lambda *_: self._fb_load()), False, False, 0)
+        box.pack_start(nav, False, False, 0)
+        self.f_store = Gtk.ListStore(str, str, str, bool)   # icon, name, size, is_dir
+        self.f_view = Gtk.TreeView(model=self.f_store); self.f_view.set_rubber_banding(True)
+        self.f_view.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
+        self.f_view.append_column(Gtk.TreeViewColumn("", Gtk.CellRendererText(), text=0))
+        cn = Gtk.TreeViewColumn("Name", Gtk.CellRendererText(), text=1); cn.set_expand(True); self.f_view.append_column(cn)
+        rs = Gtk.CellRendererText(); rs.set_property("xalign", 1.0); self.f_view.append_column(Gtk.TreeViewColumn("Size", rs, text=2))
+        self.f_view.connect("row-activated", self._fb_activate)
+        box.pack_start(self._scroller(self.f_view), True, True, 0)
+        bar = Gtk.Box(spacing=8)
+        bar.pack_start(self._act("Pull →…", self._fb_pull), False, False, 0)
+        bar.pack_start(self._act("Push here…", self._fb_push), False, False, 0)
+        bar.pack_start(self._act("New folder", self._fb_mkdir), False, False, 0)
+        bar.pack_start(self._act("Rename", self._fb_rename), False, False, 0)
+        bar.pack_start(self._act("Move to…", self._fb_move), False, False, 0)
+        bar.pack_start(self._act("Delete", self._fb_delete, danger=True), False, False, 0)
+        box.pack_start(bar, False, False, 0)
+        self.f_status = Gtk.Label(label="connect a device to browse"); self.f_status.set_xalign(0); self.f_status.get_style_context().add_class("sub")
+        box.pack_start(self.f_status, False, False, 0)
+        GLib.timeout_add(900, lambda: (self._fb_load(), False)[1])
         return box
 
-    def _push(self, *_):
-        if not self._need_device(): return
-        d = Gtk.FileChooserDialog(title="File to push", parent=self, action=Gtk.FileChooserAction.OPEN)
-        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Push", Gtk.ResponseType.OK)
-        if d.run() == Gtk.ResponseType.OK:
-            src = d.get_filename(); d.destroy()
-            self._run_async(lambda: adb("push", src, self.f_remote.get_text(), timeout=300), self.f_out.set_text)
-        else: d.destroy()
+    def _human(self, n):
+        try: n = int(n)
+        except Exception: return n
+        for u in ("B", "K", "M", "G", "T"):
+            if n < 1024: return ("%d%s" % (n, u)) if u == "B" else ("%.1f%s" % (n, u))
+            n /= 1024.0
+        return "%.1fP" % n
 
-    def _pull(self, *_):
-        if not self._need_device(): return
+    def _fb_go(self, path):
+        if not path.endswith("/"): path += "/"
+        self.f_path.set_text(path); self._fb_load()
+
+    def _fb_up(self):
+        p = self.f_path.get_text().rstrip("/"); self._fb_go(os.path.dirname(p) or "/")
+
+    def _fb_load(self):
+        if self._state() != "device":
+            self.f_store.clear(); self.f_status.set_text("no device connected"); return
+        path = self.f_path.get_text(); self.f_status.set_text("loading " + path + " …")
+        def read():
+            out = adb("shell", "ls", "-laA", "--color=never", path, timeout=20)
+            rows = []
+            for ln in out.splitlines():
+                if ln.startswith("total ") or not ln.strip(): continue
+                parts = ln.split(None, 7)
+                if len(parts) < 8: continue
+                perms, size, name = parts[0], parts[4], parts[7]
+                if name in (".", ".."): continue
+                link = perms[0] == "l"
+                if link and " -> " in name: name = name.split(" -> ", 1)[0]
+                is_dir = perms[0] == "d" or link
+                rows.append(("[dir]" if is_dir else "file", name, "" if is_dir else self._human(size), is_dir))
+            rows.sort(key=lambda r: (not r[3], r[1].lower()))
+            return rows
+        def fill(rows):
+            self.f_store.clear()
+            for r in rows: self.f_store.append(list(r))
+            self.f_status.set_text("%s · %d items" % (self.f_path.get_text(), len(rows)))
+        self._run_async(read, fill)
+
+    def _fb_activate(self, view, p, col):
+        it = self.f_store.get_iter(p)
+        if self.f_store[it][3]: self._fb_go(self.f_path.get_text().rstrip("/") + "/" + self.f_store[it][1])
+
+    def _fb_sel(self):
+        m, paths = self.f_view.get_selection().get_selected_rows()
+        return [(m[p][1], m[p][3]) for p in paths]
+
+    def _fb_transfer(self, jobs, donemsg, reload=False):
+        self.f_status.set_text("transferring %d…" % len(jobs))
+        state = {"ok": 0, "err": 0}; lock = threading.Lock()
+        def one(job):
+            op, a, b = job
+            r = subprocess.run(["adb", op, a, b], capture_output=True, text=True)
+            with lock:
+                state["ok" if r.returncode == 0 else "err"] += 1
+                GLib.idle_add(self.f_status.set_text, "transferring %d/%d…" % (state["ok"] + state["err"], len(jobs)))
+        def run():
+            import concurrent.futures as cf
+            with cf.ThreadPoolExecutor(max_workers=6) as ex:
+                list(ex.map(one, jobs))
+            msg = (donemsg % state["ok"]) + (" · %d failed" % state["err"] if state["err"] else "")
+            GLib.idle_add(self.f_status.set_text, msg)
+            if reload: GLib.idle_add(self._fb_load)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _fb_pull(self, *_):
+        sel = self._fb_sel()
+        if not sel: self._msg("Select items", "Pick file(s) or folder(s) to pull."); return
         d = Gtk.FileChooserDialog(title="Pull into folder", parent=self, action=Gtk.FileChooserAction.SELECT_FOLDER)
         d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Pull", Gtk.ResponseType.OK)
-        if d.run() == Gtk.ResponseType.OK:
-            dst = d.get_filename(); d.destroy()
-            self._run_async(lambda: adb("pull", self.f_remote.get_text(), dst, timeout=300), self.f_out.set_text)
-        else: d.destroy()
+        ok = d.run() == Gtk.ResponseType.OK; dst = d.get_filename(); d.destroy()
+        if not ok: return
+        base = self.f_path.get_text().rstrip("/")
+        self._fb_transfer([("pull", base + "/" + n, dst) for n, _ in sel], "pulled %d → " + dst)
+
+    def _fb_push(self, *_):
+        if not self._need_device(): return
+        d = Gtk.FileChooserDialog(title="Push file(s) here", parent=self, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Push", Gtk.ResponseType.OK); d.set_select_multiple(True)
+        ok = d.run() == Gtk.ResponseType.OK; srcs = d.get_filenames(); d.destroy()
+        if not ok or not srcs: return
+        dst = self.f_path.get_text()
+        self._fb_transfer([("push", s, dst) for s in srcs], "pushed %d here", reload=True)
+
+    def _fb_delete(self, *_):
+        sel = self._fb_sel()
+        if not sel: return
+        if not self._confirm("Delete %d item(s)" % len(sel), "Permanently delete on the device?"): return
+        base = self.f_path.get_text().rstrip("/")
+        def run():
+            for n, is_dir in sel: adb("shell", "rm", "-rf" if is_dir else "-f", base + "/" + n)
+            GLib.idle_add(self._fb_load); GLib.idle_add(self.f_status.set_text, "deleted %d" % len(sel))
+        self._run_async(run)
+
+    def _fb_mkdir(self, *_):
+        name = self._prompt("New folder", "folder name")
+        if name: self._run_async(lambda: adb("shell", "mkdir", "-p", self.f_path.get_text().rstrip("/") + "/" + name), lambda *_: self._fb_load())
+
+    def _fb_rename(self, *_):
+        sel = self._fb_sel()
+        if len(sel) != 1: self._msg("Select one", "Pick a single item to rename."); return
+        old = sel[0][0]; new = self._prompt("Rename", "new name", old)
+        if not new or new == old: return
+        base = self.f_path.get_text().rstrip("/")
+        self._run_async(lambda: adb("shell", "mv", base + "/" + old, base + "/" + new), lambda *_: self._fb_load())
+
+    def _fb_move(self, *_):
+        sel = self._fb_sel()
+        if not sel: return
+        dst = self._prompt("Move to", "destination path on device", "/sdcard/")
+        if not dst: return
+        base = self.f_path.get_text().rstrip("/")
+        def run():
+            for n, _ in sel: adb("shell", "mv", base + "/" + n, dst)
+            GLib.idle_add(self._fb_load); GLib.idle_add(self.f_status.set_text, "moved %d → %s" % (len(sel), dst))
+        self._run_async(run)
+
+    def _prompt(self, title, placeholder, default=""):
+        d = Gtk.Dialog(title=title, transient_for=self, modal=True)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "OK", Gtk.ResponseType.OK)
+        e = Gtk.Entry(); e.set_placeholder_text(placeholder); e.set_text(default); e.set_activates_default(True)
+        d.get_content_area().add(e); d.set_default_response(Gtk.ResponseType.OK); d.show_all()
+        v = e.get_text().strip() if d.run() == Gtk.ResponseType.OK else None
+        d.destroy(); return v
 
     def _p_screen(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -447,51 +585,52 @@ class DroidB(Gtk.Window):
     def _p_flash(self):
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         content.pack_start(self._hdr("Flash", "vendor flashing - MediaTek (mtkclient) + Samsung Odin (Heimdall)"), False, False, 0)
-        content.pack_start(Gtk.Label(label="MediaTek  ·  BROM / Preloader (mtkclient) - full", xalign=0), False, False, 0)
+        mtk = self._section("MediaTek", "BROM / Preloader engine · mtkclient", "MTK")
         mc = Gtk.Box(spacing=8)
         mc.pack_start(self._act("Detect", lambda *_: self._vendor("mtk", "gettargetconfig")), False, False, 0)
         mc.pack_start(self._act("Read GPT", lambda *_: self._vendor("mtk", "printgpt")), False, False, 0)
         mc.pack_start(self._act("Payload (bypass)", lambda *_: self._vendor("mtk", "payload")), False, False, 0)
         mc.pack_start(self._act("Crash→BROM", lambda *_: self._vendor("mtk", "crash")), False, False, 0)
         mc.pack_start(self._act("Reset", lambda *_: self._vendor("mtk", "reset")), False, False, 0)
-        content.pack_start(mc, False, False, 0)
+        mtk.pack_start(mc, False, False, 0)
         mp = Gtk.Box(spacing=8)
-        mp.pack_start(Gtk.Label(label="partition"), False, False, 0)
+        ml = Gtk.Label(label="partition"); ml.get_style_context().add_class("slotlbl"); mp.pack_start(ml, False, False, 0)
         self.mtk_part = Gtk.Entry(); self.mtk_part.set_hexpand(True)
         self.mtk_part.set_placeholder_text("boot / recovery / system / vbmeta / userdata…")
         mp.pack_start(self.mtk_part, True, True, 0)
         mp.pack_start(self._act("Read", lambda *_: self._mtk_part_op("r")), False, False, 0)
         mp.pack_start(self._act("Write", lambda *_: self._mtk_part_op("w"), danger=True), False, False, 0)
         mp.pack_start(self._act("Erase", lambda *_: self._mtk_part_op("e"), danger=True), False, False, 0)
-        content.pack_start(mp, False, False, 0)
+        mtk.pack_start(mp, False, False, 0)
         mf = Gtk.Box(spacing=8)
         mf.pack_start(self._act("Backup all", lambda *_: self._vendor("mtk", "rl " + self._outdir() + "/mtk-backup")), False, False, 0)
         mf.pack_start(self._act("Flash folder…", self._mtk_flash_all, danger=True), False, False, 0)
         mf.pack_start(self._act("Unlock BL", lambda *_: self._mtk_lock("unlock"), danger=True), False, False, 0)
         mf.pack_start(self._act("Lock BL", lambda *_: self._mtk_lock("lock")), False, False, 0)
-        content.pack_start(mf, False, False, 0)
-        content.pack_start(Gtk.Separator(), False, False, 0)
-        content.pack_start(Gtk.Label(label="Samsung Odin  ·  Download mode (Heimdall) - fill the BL / AP / CP / CSC slots", xalign=0), False, False, 0)
+        mtk.pack_start(mf, False, False, 0)
+        content.pack_start(mtk, False, False, 0)
+        sam = self._section("Samsung Odin", "Download mode · Heimdall · fill the firmware slots", "SAMSUNG")
         self.sam = {}
         grid = Gtk.Grid(column_spacing=8, row_spacing=6)
         for i, slot in enumerate(("BL", "AP", "CP", "CSC", "USERDATA", "PIT")):
-            lab = Gtk.Label(label=slot); lab.set_xalign(0); lab.set_size_request(74, -1)
+            lab = Gtk.Label(label=slot); lab.set_xalign(0); lab.set_size_request(74, -1); lab.get_style_context().add_class("slotlbl")
             ent = Gtk.Entry(); ent.set_hexpand(True)
             ent.set_placeholder_text(("%s_*.tar.md5" % slot) if slot != "PIT" else "*.pit  (optional)")
             self.sam[slot] = ent
             grid.attach(lab, 0, i, 1, 1); grid.attach(ent, 1, i, 1, 1)
             grid.attach(self._act("…", lambda _b, s=slot: self._sam_pick(s)), 2, i, 1, 1)
-        content.pack_start(grid, False, False, 0)
+        sam.pack_start(grid, False, False, 0)
         opt = Gtk.Box(spacing=14)
         self.sam_reboot = Gtk.CheckButton(label="Auto-Reboot"); self.sam_reboot.set_active(True)
         self.sam_repart = Gtk.CheckButton(label="Re-Partition")
         self.sam_nand = Gtk.CheckButton(label="Nand Erase")
         for w in (self.sam_reboot, self.sam_repart, self.sam_nand): opt.pack_start(w, False, False, 0)
-        content.pack_start(opt, False, False, 0)
+        sam.pack_start(opt, False, False, 0)
         sr = Gtk.Box(spacing=8)
         sr.pack_start(self._act("Detect (PIT)", lambda *_: self._vendor("heimdall", "print-pit")), False, False, 0)
         sr.pack_start(self._act("Flash firmware", self._sam_flash, danger=True), False, False, 0)
-        content.pack_start(sr, False, False, 0)
+        sam.pack_start(sr, False, False, 0)
+        content.pack_start(sam, False, False, 0)
         self.fl_out = Gtk.Label(label="MediaTek: hold Vol keys + plug in (BROM).   Samsung: boot Download mode (Vol-Down + connect).")
         self.fl_out.set_xalign(0); self.fl_out.get_style_context().add_class("sub"); self.fl_out.set_line_wrap(True)
         content.pack_start(self.fl_out, False, False, 0)
