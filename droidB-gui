@@ -8,29 +8,28 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib, Pango
 
 VERSION = "0.0.1"
-GREEN = "#3ddc84"
+AC = "#e8702a"   # ARXOS accent (gold/orange) - matches the Control Center + arxsenal look
 
 CSS = ("""
-window { background:#070d0a; }
-.title { font-weight:800; font-size:22px; color:#eafff2; }
+window { background:#0a0a0c; }
+.title { font-weight:800; font-size:22px; color:#ffffff; }
 .ver   { color:%(g)s; font-size:10px; font-weight:700; letter-spacing:1px; }
-.dev   { font-size:12px; color:#cfe9da; }
+.dev   { font-size:12px; color:#c9c9d0; }
 .dev.on  { color:%(g)s; font-weight:700; }
 .dev.off { color:#7d8a83; }
-.side  { background:#0a130d; }
-list.side row { color:#bfe6cf; }
-list.side row:selected { background:rgba(61,220,132,0.16); color:#eafff2; }
-.h2    { color:#eafff2; font-size:15px; font-weight:700; }
-.sub   { color:#84a594; font-size:11px; }
-.kv k  { color:#84a594; }
-button.act { background:rgba(61,220,132,0.12); border:1px solid rgba(61,220,132,0.40); border-radius:8px; color:#eafff2; padding:7px 14px; }
-button.act:hover { background:rgba(61,220,132,0.22); border-color:%(g)s; }
+.side  { background:#0d0d10; }
+list.side row { color:#c9c9d0; }
+list.side row:selected { background:rgba(232,112,42,0.16); color:#ffffff; }
+.h2    { color:#ffffff; font-size:15px; font-weight:700; }
+.sub   { color:#8a8a92; font-size:11px; }
+button.act { background:rgba(255,255,255,0.05); border:1px solid rgba(232,112,42,0.40); border-radius:8px; color:#eee; padding:7px 14px; }
+button.act:hover { background:rgba(232,112,42,0.18); border-color:%(g)s; }
 button.danger { border-color:rgba(255,90,90,0.5); }
 button.danger:hover { background:rgba(255,90,90,0.18); border-color:#ff5a5a; }
-entry, .term { background:#050a07; color:#cfe9da; border:1px solid rgba(61,220,132,0.22); border-radius:8px; }
+entry, .term { background:#050506; color:#c9c9d0; border:1px solid rgba(232,112,42,0.22); border-radius:8px; }
 .term { font-family:monospace; font-size:11px; padding:6px; }
-.mono { font-family:monospace; font-size:12px; color:#cfe9da; }
-""" % {"g": GREEN}).encode()
+.mono { font-family:monospace; font-size:12px; color:#c9c9d0; }
+""" % {"g": AC}).encode()
 
 
 def adb(*args, timeout=20):
@@ -64,7 +63,7 @@ class DroidB(Gtk.Window):
         # header
         hb = Gtk.Box(spacing=12)
         for m in ("set_margin_top","set_margin_bottom","set_margin_start","set_margin_end"): getattr(hb, m)(14)
-        t = Gtk.Label(); t.set_markup("<span font='22' weight='800'>droid<span foreground='%s'>B</span></span>" % GREEN)
+        t = Gtk.Label(); t.set_markup("<span font='22' weight='800'>droid<span foreground='%s'>B</span></span>" % AC)
         t.get_style_context().add_class("title"); hb.pack_start(t, False, False, 0)
         v = Gtk.Label(label="ARXOS ANDROID TOOLKIT  ·  v" + VERSION); v.get_style_context().add_class("ver")
         v.set_valign(Gtk.Align.CENTER); hb.pack_start(v, False, False, 0)
@@ -91,6 +90,7 @@ class DroidB(Gtk.Window):
         self.stack.add_titled(self._p_fastboot(), "fastboot", "Fastboot")
         self.stack.add_titled(self._p_shell(),    "shell",    "Shell")
         self.stack.add_titled(self._p_flash(),    "flash",    "Flash")
+        self.stack.add_titled(self._p_mod(),      "mod",      "Root/ROM")
 
         self.add(root)
         self._refresh(); GLib.timeout_add_seconds(3, self._refresh)
@@ -445,28 +445,57 @@ class DroidB(Gtk.Window):
                                    self.sh_out.scroll_to_mark(self.sh_buf.get_insert(), 0, False, 0, 0)))
 
     def _p_flash(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.pack_start(self._hdr("Flash", "vendor flashing - MediaTek (mtkclient) and Samsung (Heimdall/Odin)"), False, False, 0)
-        mtk = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        mtk.pack_start(Gtk.Label(label="MediaTek (BROM/Preloader via mtkclient)", xalign=0), False, False, 0)
-        mr = Gtk.Box(spacing=8)
-        mr.pack_start(self._act("Read info", lambda *_: self._vendor("mtk", "printgpt")), False, False, 0)
-        mr.pack_start(self._act("Backup (readflash)", lambda *_: self._vendor("mtk", "rl " + self._outdir())), False, False, 0)
-        mr.pack_start(self._act("Flash partition…", lambda *_: self._vendor_flash("mtk")), False, False, 0)
-        mtk.pack_start(mr, False, False, 0)
-        box.pack_start(mtk, False, False, 0)
-        box.pack_start(Gtk.Separator(), False, False, 0)
-        sam = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        sam.pack_start(Gtk.Label(label="Samsung (Download mode via Heimdall)", xalign=0), False, False, 0)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        content.pack_start(self._hdr("Flash", "vendor flashing - MediaTek (mtkclient) + Samsung Odin (Heimdall)"), False, False, 0)
+        content.pack_start(Gtk.Label(label="MediaTek  ·  BROM / Preloader (mtkclient) - full", xalign=0), False, False, 0)
+        mc = Gtk.Box(spacing=8)
+        mc.pack_start(self._act("Detect", lambda *_: self._vendor("mtk", "gettargetconfig")), False, False, 0)
+        mc.pack_start(self._act("Read GPT", lambda *_: self._vendor("mtk", "printgpt")), False, False, 0)
+        mc.pack_start(self._act("Payload (bypass)", lambda *_: self._vendor("mtk", "payload")), False, False, 0)
+        mc.pack_start(self._act("Crash→BROM", lambda *_: self._vendor("mtk", "crash")), False, False, 0)
+        mc.pack_start(self._act("Reset", lambda *_: self._vendor("mtk", "reset")), False, False, 0)
+        content.pack_start(mc, False, False, 0)
+        mp = Gtk.Box(spacing=8)
+        mp.pack_start(Gtk.Label(label="partition"), False, False, 0)
+        self.mtk_part = Gtk.Entry(); self.mtk_part.set_hexpand(True)
+        self.mtk_part.set_placeholder_text("boot / recovery / system / vbmeta / userdata…")
+        mp.pack_start(self.mtk_part, True, True, 0)
+        mp.pack_start(self._act("Read", lambda *_: self._mtk_part_op("r")), False, False, 0)
+        mp.pack_start(self._act("Write", lambda *_: self._mtk_part_op("w"), danger=True), False, False, 0)
+        mp.pack_start(self._act("Erase", lambda *_: self._mtk_part_op("e"), danger=True), False, False, 0)
+        content.pack_start(mp, False, False, 0)
+        mf = Gtk.Box(spacing=8)
+        mf.pack_start(self._act("Backup all", lambda *_: self._vendor("mtk", "rl " + self._outdir() + "/mtk-backup")), False, False, 0)
+        mf.pack_start(self._act("Flash folder…", self._mtk_flash_all, danger=True), False, False, 0)
+        mf.pack_start(self._act("Unlock BL", lambda *_: self._mtk_lock("unlock"), danger=True), False, False, 0)
+        mf.pack_start(self._act("Lock BL", lambda *_: self._mtk_lock("lock")), False, False, 0)
+        content.pack_start(mf, False, False, 0)
+        content.pack_start(Gtk.Separator(), False, False, 0)
+        content.pack_start(Gtk.Label(label="Samsung Odin  ·  Download mode (Heimdall) - fill the BL / AP / CP / CSC slots", xalign=0), False, False, 0)
+        self.sam = {}
+        grid = Gtk.Grid(column_spacing=8, row_spacing=6)
+        for i, slot in enumerate(("BL", "AP", "CP", "CSC", "USERDATA", "PIT")):
+            lab = Gtk.Label(label=slot); lab.set_xalign(0); lab.set_size_request(74, -1)
+            ent = Gtk.Entry(); ent.set_hexpand(True)
+            ent.set_placeholder_text(("%s_*.tar.md5" % slot) if slot != "PIT" else "*.pit  (optional)")
+            self.sam[slot] = ent
+            grid.attach(lab, 0, i, 1, 1); grid.attach(ent, 1, i, 1, 1)
+            grid.attach(self._act("…", lambda _b, s=slot: self._sam_pick(s)), 2, i, 1, 1)
+        content.pack_start(grid, False, False, 0)
+        opt = Gtk.Box(spacing=14)
+        self.sam_reboot = Gtk.CheckButton(label="Auto-Reboot"); self.sam_reboot.set_active(True)
+        self.sam_repart = Gtk.CheckButton(label="Re-Partition")
+        self.sam_nand = Gtk.CheckButton(label="Nand Erase")
+        for w in (self.sam_reboot, self.sam_repart, self.sam_nand): opt.pack_start(w, False, False, 0)
+        content.pack_start(opt, False, False, 0)
         sr = Gtk.Box(spacing=8)
-        sr.pack_start(self._act("Detect (print-pit)", lambda *_: self._vendor("heimdall", "print-pit")), False, False, 0)
-        sr.pack_start(self._act("Flash partition…", lambda *_: self._vendor_flash("heimdall")), False, False, 0)
-        sam.pack_start(sr, False, False, 0)
-        box.pack_start(sam, False, False, 0)
-        self.fl_out = Gtk.Label(label="MediaTek: hold Vol-keys + plug in (BROM). Samsung: boot into Download mode.")
-        self.fl_out.set_xalign(0); self.fl_out.get_style_context().add_class("mono"); self.fl_out.set_selectable(True)
-        box.pack_start(self._scroller(self.fl_out), True, True, 0)
-        return box
+        sr.pack_start(self._act("Detect (PIT)", lambda *_: self._vendor("heimdall", "print-pit")), False, False, 0)
+        sr.pack_start(self._act("Flash firmware", self._sam_flash, danger=True), False, False, 0)
+        content.pack_start(sr, False, False, 0)
+        self.fl_out = Gtk.Label(label="MediaTek: hold Vol keys + plug in (BROM).   Samsung: boot Download mode (Vol-Down + connect).")
+        self.fl_out.set_xalign(0); self.fl_out.get_style_context().add_class("sub"); self.fl_out.set_line_wrap(True)
+        content.pack_start(self.fl_out, False, False, 0)
+        return self._scroller(content)
 
     def _vendor_tool(self, kind):
         # returns the command base, installing the tool on demand via a terminal
@@ -486,27 +515,172 @@ class DroidB(Gtk.Window):
         subprocess.Popen(["xfce4-terminal", "--title", "droidB · " + tool, "-x", "bash", "-lc",
                           "%s %s; echo; read -rp 'done - enter to close…'" % (tool, args)])
 
-    def _vendor_flash(self, kind):
-        tool = self._vendor_tool(kind)
-        if not tool: return
-        part = ""
-        if kind == "heimdall":
-            dlg = Gtk.Dialog(title="Partition name", transient_for=self, modal=True)
-            dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Next", Gtk.ResponseType.OK)
-            e = Gtk.Entry(); e.set_placeholder_text("BOOT / RECOVERY / SYSTEM"); dlg.get_content_area().add(e); dlg.show_all()
-            if dlg.run() != Gtk.ResponseType.OK: dlg.destroy(); return
-            part = e.get_text().strip(); dlg.destroy()
-        d = Gtk.FileChooserDialog(title="Image to flash", parent=self, action=Gtk.FileChooserAction.OPEN)
-        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Flash", Gtk.ResponseType.OK)
+    def _mtk_part_op(self, op):
+        if not self._vendor_tool("mtk"): return
+        part = self.mtk_part.get_text().strip()
+        if not part: self._msg("Partition?", "Enter a partition name (e.g. boot)."); return
+        if op == "e":
+            if self._confirm("Erase " + part, "Erase the %s partition?" % part):
+                self._vendor("mtk", "e " + shlex.quote(part))
+            return
+        d = Gtk.FileChooserDialog(title=("Save to" if op == "r" else "Image to write"), parent=self,
+                                  action=(Gtk.FileChooserAction.SAVE if op == "r" else Gtk.FileChooserAction.OPEN))
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "OK", Gtk.ResponseType.OK)
+        if op == "r": d.set_current_folder(self._outdir()); d.set_current_name(part + ".img")
+        ok = d.run() == Gtk.ResponseType.OK; f = d.get_filename(); d.destroy()
+        if not ok or not f: return
+        if op == "w" and not self._confirm("Flash " + part, "Write %s to %s? Can brick." % (os.path.basename(f), part)): return
+        self._vendor("mtk", "%s %s %s" % (op, shlex.quote(part), shlex.quote(f)))
+
+    def _mtk_flash_all(self, *_):
+        if not self._vendor_tool("mtk"): return
+        d = Gtk.FileChooserDialog(title="Folder of partition images", parent=self, action=Gtk.FileChooserAction.SELECT_FOLDER)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Flash all", Gtk.ResponseType.OK)
         if d.run() != Gtk.ResponseType.OK: d.destroy(); return
-        img = d.get_filename(); d.destroy()
-        if not self._confirm("Flash via %s" % tool, "Flashing can brick the device. Continue?"): return
-        cmd = ("mtk w %s '%s'" % (part or "boot", img)) if kind == "mtk" else ("heimdall flash --%s '%s'" % (part, img))
-        subprocess.Popen(["xfce4-terminal", "--title", "droidB · flash", "-x", "bash", "-lc",
+        folder = d.get_filename(); d.destroy()
+        if self._confirm("Flash all", "Write every image in the folder to its partition? Can brick."):
+            self._vendor("mtk", "wl " + shlex.quote(folder))
+
+    def _mtk_lock(self, which):
+        if not self._vendor_tool("mtk"): return
+        if self._confirm("%s bootloader" % which.title(), "%s the bootloader via seccfg? Unlock wipes data." % which.title()):
+            self._vendor("mtk", "da seccfg " + which)
+
+    def _sam_pick(self, slot):
+        d = Gtk.FileChooserDialog(title=slot + " file", parent=self, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Select", Gtk.ResponseType.OK)
+        if d.run() == Gtk.ResponseType.OK: self.sam[slot].set_text(d.get_filename())
+        d.destroy()
+
+    def _sam_flash(self, *_):
+        files = [self.sam[s].get_text().strip() for s in ("BL", "AP", "CP", "CSC", "USERDATA") if self.sam[s].get_text().strip()]
+        pit = self.sam["PIT"].get_text().strip()
+        if not files:
+            self._msg("No firmware", "Fill at least one Odin slot (BL / AP / CP / CSC)."); return
+        if not have("heimdall"):
+            if self._confirm("heimdall not installed", "Install heimdall now?"):
+                subprocess.Popen(["xfce4-terminal", "-x", "bash", "-lc", "arx install heimdall; read -rp 'enter…'"])
+            return
+        if not self._confirm("Flash Samsung firmware",
+                             "The device must be in Download mode. Re-Partition wipes data and can brick. Continue?"):
+            return
+        args = ["droidB-samsung"]
+        if pit: args += ["--pit", pit]
+        if self.sam_repart.get_active(): args += ["--repartition"]
+        if not self.sam_reboot.get_active(): args += ["--no-reboot"]
+        if self.sam_nand.get_active(): args += ["--nand-erase"]
+        args += files
+        cmd = " ".join(shlex.quote(a) for a in args)
+        subprocess.Popen(["xfce4-terminal", "--title", "droidB · Samsung Odin flash", "-x", "bash", "-lc",
                           "%s; echo; read -rp 'done - enter to close…'" % cmd])
+
+    # ---- Root / ROM ----
+    def _pick(self, title, save=False, name=None):
+        act = Gtk.FileChooserAction.SAVE if save else Gtk.FileChooserAction.OPEN
+        d = Gtk.FileChooserDialog(title=title, parent=self, action=act)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "OK", Gtk.ResponseType.OK)
+        if name: d.set_current_folder(self._outdir()); d.set_current_name(name)
+        f = d.get_filename() if d.run() == Gtk.ResponseType.OK else None
+        d.destroy(); return f
+
+    def _termrun(self, title, cmd):
+        subprocess.Popen(["xfce4-terminal", "--title", "droidB · " + title, "-x", "bash", "-lc",
+                          "%s; echo; read -rp 'done - enter to close…'" % cmd])
+
+    def _p_mod(self):
+        c = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        c.pack_start(self._hdr("Root / ROM", "Magisk, TWRP, GSI, custom ROM, image extract"), False, False, 0)
+        c.pack_start(Gtk.Label(label="Magisk  ·  root via a patched boot image", xalign=0), False, False, 0)
+        mg = Gtk.Box(spacing=8)
+        mg.pack_start(self._act("Pull current boot", lambda *_: self._pull_boot()), False, False, 0)
+        mg.pack_start(self._act("Patch boot.img…", self._magisk_patch), False, False, 0)
+        mg.pack_start(self._act("Flash boot…", lambda *_: self._fb_flash_part("boot"), danger=True), False, False, 0)
+        c.pack_start(mg, False, False, 0)
+        c.pack_start(Gtk.Label(label="TWRP / custom recovery", xalign=0), False, False, 0)
+        tw = Gtk.Box(spacing=8)
+        tw.pack_start(self._act("Flash recovery…", lambda *_: self._fb_flash_part("recovery"), danger=True), False, False, 0)
+        tw.pack_start(self._act("Boot recovery (temp)…", self._boot_img), False, False, 0)
+        c.pack_start(tw, False, False, 0)
+        c.pack_start(Gtk.Label(label="GSI  ·  Treble system image", xalign=0), False, False, 0)
+        gs = Gtk.Box(spacing=8)
+        gs.pack_start(self._act("Flash GSI…", self._flash_gsi, danger=True), False, False, 0)
+        c.pack_start(gs, False, False, 0)
+        c.pack_start(Gtk.Label(label="Custom ROM", xalign=0), False, False, 0)
+        rm = Gtk.Box(spacing=8)
+        rm.pack_start(self._act("Sideload ZIP… (recovery)", self._sideload), False, False, 0)
+        rm.pack_start(self._act("Fastboot update ZIP…", self._fb_update, danger=True), False, False, 0)
+        c.pack_start(rm, False, False, 0)
+        c.pack_start(Gtk.Label(label="Image extract", xalign=0), False, False, 0)
+        ex = Gtk.Box(spacing=8)
+        ex.pack_start(self._act("payload.bin / OTA…", lambda *_: self._extract("payload")), False, False, 0)
+        ex.pack_start(self._act("super.img…", lambda *_: self._extract("super")), False, False, 0)
+        c.pack_start(ex, False, False, 0)
+        self.mod_out = Gtk.Label(label="patched images + extracts save to ~/droidB"); self.mod_out.set_xalign(0)
+        self.mod_out.get_style_context().add_class("sub"); self.mod_out.set_line_wrap(True)
+        c.pack_start(self.mod_out, False, False, 0)
+        return self._scroller(c)
+
+    def _pull_boot(self):
+        if not self._need_device(): return
+        out = os.path.join(self._outdir(), "boot.img")
+        self.mod_out.set_text("pulling boot (needs root)…")
+        def run():
+            adb("shell", "su", "-c", "dd if=/dev/block/by-name/boot of=/sdcard/droidB-boot.img", timeout=40)
+            adb("pull", "/sdcard/droidB-boot.img", out, timeout=60); adb("shell", "rm", "/sdcard/droidB-boot.img")
+            return ("saved " + out) if os.path.exists(out) else "could not pull boot (root needed - or extract boot.img from firmware)"
+        self._run_async(run, self.mod_out.set_text)
+
+    def _magisk_patch(self, *_):
+        boot = self._pick("boot.img to patch with Magisk")
+        if not boot: return
+        self.mod_out.set_text("patching with Magisk → %s_magisk.img (watch the terminal)" % os.path.splitext(boot)[0])
+        self._termrun("Magisk patch", "droidB-mod magisk-patch %s" % shlex.quote(boot))
+
+    def _fb_flash_part(self, part):
+        img = self._pick("%s image (fastboot)" % part)
+        if not img: return
+        if not self._confirm("Flash %s" % part, "fastboot flash %s '%s'? Can brick." % (part, os.path.basename(img))): return
+        self._run_async(lambda: fastboot("flash", part, img, timeout=300), lambda r: self.mod_out.set_text(r or "flash done"))
+
+    def _boot_img(self, *_):
+        img = self._pick("image to boot temporarily")
+        if not img: return
+        self._run_async(lambda: fastboot("boot", img, timeout=120), lambda r: self.mod_out.set_text(r or "booting…"))
+
+    def _flash_gsi(self, *_):
+        img = self._pick("GSI system image (.img)")
+        if not img: return
+        if not self._confirm("Flash GSI", "Flash this GSI to 'system' and wipe userdata? The device must be unlocked + in fastboot."):
+            return
+        def run():
+            fastboot("--disable-verity", "--disable-verification", "flash", "system", img, timeout=400)
+            fastboot("-w", timeout=60); return "GSI flashed + data wiped - reboot the device"
+        self.mod_out.set_text("flashing GSI…"); self._run_async(run, self.mod_out.set_text)
+
+    def _sideload(self, *_):
+        z = self._pick("ROM .zip to sideload (device: recovery → Apply update → from ADB)")
+        if not z: return
+        self._termrun("sideload ROM", "adb sideload %s" % shlex.quote(z))
+
+    def _fb_update(self, *_):
+        z = self._pick("fastboot update package (.zip)")
+        if not z: return
+        if not self._confirm("Fastboot update", "fastboot update '%s'? Can brick." % os.path.basename(z)): return
+        self._termrun("fastboot update", "fastboot update %s" % shlex.quote(z))
+
+    def _extract(self, kind):
+        f = self._pick("payload.bin or OTA .zip" if kind == "payload" else "super.img")
+        if not f: return
+        out = os.path.join(self._outdir(), kind)
+        self.mod_out.set_text("extracting → %s (watch the terminal)" % out)
+        self._termrun(kind + " extract", "droidB-mod %s %s %s" % (kind, shlex.quote(f), shlex.quote(out)))
 
 
 if __name__ == "__main__":
     if "--version" in sys.argv or "-V" in sys.argv:
         print("droidB-gui %s (ARXOS)" % VERSION); sys.exit(0)
-    w = DroidB(); w.connect("destroy", Gtk.main_quit); w.show_all(); Gtk.main()
+    w = DroidB(); w.connect("destroy", Gtk.main_quit); w.show_all()
+    if "--panel" in sys.argv:
+        try: w.stack.set_visible_child_name(sys.argv[sys.argv.index("--panel") + 1])
+        except Exception: pass
+    Gtk.main()

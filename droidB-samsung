@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# droidB-samsung 0.0.1 - Odin-style Samsung flasher (Heimdall backend).
+# Takes the Odin firmware slots (BL/AP/CP/CSC/USERDATA tar.md5 files) + optional PIT,
+# extracts them, decompresses any .lz4, maps each image to its partition, and runs a
+# single `heimdall flash`. The device must be in Download mode (Vol-Down + Bixby/Home + USB).
+#
+# Usage:
+#   droidB-samsung [--pit FILE] [--repartition] [--no-reboot] [--nand-erase] FILE...
+#   FILE... = any of the BL_ AP_ CP_ CSC_ USERDATA_ tar / tar.md5 / img / lz4 files.
+set -u
+GR=$'\033[1;32m'; RD=$'\033[1;31m'; DM=$'\033[90m'; BD=$'\033[1m'; RS=$'\033[0m'
+say(){ printf "  ${GR}>>${RS} %s\n" "$*"; }
+err(){ printf "  ${RD}xx${RS} %s\n" "$*"; }
+
+command -v heimdall >/dev/null 2>&1 || { err "heimdall is not installed (arx install heimdall)"; exit 1; }
+command -v lz4 >/dev/null 2>&1 || sudo pacman -S --noconfirm --needed lz4 >/dev/null 2>&1 || true
+
+PIT="" ; OPTS=(); FILES=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pit) PIT="$2"; shift 2;;
+    --repartition) OPTS+=(--repartition); shift;;
+    --no-reboot)   OPTS+=(--no-reboot);   shift;;
+    --nand-erase)  OPTS+=(--no-reboot); NAND=1; shift;;
+    *) FILES+=("$1"); shift;;
+  esac
+done
+[ "${#FILES[@]}" -eq 0 ] && { err "no firmware files given"; exit 1; }
+
+WORK=$(mktemp -d /tmp/droidB-samsung.XXXXXX); trap 'rm -rf "$WORK"' EXIT
+say "extracting firmware into $WORK"
+for f in "${FILES[@]}"; do
+  [ -f "$f" ] || { err "missing: $f"; continue; }
+  case "$f" in
+    *.tar.md5|*.tar) printf "  ${DM}.. unpack %s${RS}\n" "${f##*/}"; tar -xf "$f" -C "$WORK" 2>/dev/null;;
+    *.img|*.bin|*.lz4|*.mbn) cp -f "$f" "$WORK/";;
+    *) printf "  ${DM}.. unpack %s${RS}\n" "${f##*/}"; tar -xf "$f" -C "$WORK" 2>/dev/null || cp -f "$f" "$WORK/";;
+  esac
+done
+
+# decompress any .lz4 in place
+for z in "$WORK"/*.lz4; do [ -e "$z" ] || continue; printf "  ${DM}.. lz4 %s${RS}\n" "${z##*/}"; lz4 -d -f -q "$z" "${z%.lz4}" 2>/dev/null && rm -f "$z"; done
+
+# map an image filename to a heimdall partition name
+part_of(){
+  local b="${1##*/}"; b="${b%.lz4}"; b="${b%.ext4}"; b="${b%.img}"; b="${b%.bin}"; b="${b%.mbn}"
+  case "${b,,}" in
+    sboot|cm|xbl|abl) echo "BOOTLOADER";;
+    boot)      echo "BOOT";;        init_boot) echo "INIT_BOOT";;
+    recovery)  echo "RECOVERY";;    system)    echo "SYSTEM";;
+    userdata)  echo "USERDATA";;    cache)     echo "CACHE";;
+    modem|cp)  echo "MODEM";;       radio)     echo "RADIO";;
+    super)     echo "SUPER";;       dtbo)      echo "DTBO";;
+    vbmeta)    echo "VBMETA";;      vbmeta_system) echo "VBMETA_SYSTEM";;
+    up_param)  echo "UP_PARAM";;    keystorage) echo "KEYSTORAGE";;
+    *)         echo "${b^^}";;
+  esac
+}
+
+ARGS=()
+say "partitions to flash:"
+shopt -s nullglob
+for img in "$WORK"/*.img "$WORK"/*.bin "$WORK"/*.mbn; do
+  [ -e "$img" ] || continue
+  case "${img##*/}" in meta-data|*.xml|cache.img.ext4) continue;; esac
+  p=$(part_of "$img")
+  printf "    ${BD}%-14s${RS} ${DM}<- %s${RS}\n" "$p" "${img##*/}"
+  ARGS+=("--$p" "$img")
+done
+[ "${#ARGS[@]}" -eq 0 ] && { err "no flashable images found in the firmware"; exit 1; }
+
+[ -n "$PIT" ] && ARGS=(--pit "$PIT" "${ARGS[@]}")
+[ "${NAND:-0}" = 1 ] && { say "nand erase requested"; heimdall flash --no-reboot "${ARGS[@]}" 2>&1; }
+
+printf "\n"; say "running heimdall flash (do not unplug)…"
+heimdall flash "${OPTS[@]}" "${ARGS[@]}"
+rc=$?
+[ $rc -eq 0 ] && say "flash complete" || err "flash failed (rc=$rc) - check Download mode + cable"
+exit $rc
