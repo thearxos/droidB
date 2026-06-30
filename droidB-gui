@@ -1,132 +1,510 @@
 #!/usr/bin/env python3
-# droidB-gui — ARXOS Android toolkit GUI (GTK3). Front-end to droidB.
-import gi, subprocess, sys
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gdk, GLib
+# droidB-gui 0.0.1 - ARXOS Android Toolkit (GTK3, fully graphical).
+# Every feature is GUI: real-time device state, apps, live logcat, files, screen,
+# fastboot, an in-window adb shell, and MediaTek/Samsung flashing. adb/fastboot are
+# the engine for now; the hot device-IO paths get a low-level (Go/Rust) core later.
+import gi, subprocess, threading, os, sys, time, shlex
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib, Pango
 
-VERSION = "0.0.1"   # ARXOS: every tool pinned to 0.0.1
+VERSION = "0.0.1"
+GREEN = "#3ddc84"
 
-BG = "/usr/share/droidB/recovery.png"
 CSS = ("""
-window { background-image: url('%s'); background-size: cover; background-position: center; background-color:#070d0a; }
-.title { font-weight:800; font-size:25px; color:#eafff2; }
-.sub   { color:#9fc1b1; font-size:10px; }
-.stat  { color:#cfe9da; font-size:12px; }
-.stat.on { color:#3ddc84; font-weight:700; }
-.stat.off{ color:#7d8a83; }
-.panel { background:rgba(5,11,8,0.62); border-radius:16px; }
-.card  { background:rgba(8,16,11,0.74); border:1px solid rgba(61,220,132,0.28); border-radius:12px; }
-.card:hover { background:rgba(61,220,132,0.15); border:1px solid rgba(61,220,132,0.72); }
-.cardt { color:#eafff2; font-size:12px; font-weight:600; }
-button.card { padding:0; }
-""" % BG).encode()
+window { background:#070d0a; }
+.title { font-weight:800; font-size:22px; color:#eafff2; }
+.ver   { color:%(g)s; font-size:10px; font-weight:700; letter-spacing:1px; }
+.dev   { font-size:12px; color:#cfe9da; }
+.dev.on  { color:%(g)s; font-weight:700; }
+.dev.off { color:#7d8a83; }
+.side  { background:#0a130d; }
+list.side row { color:#bfe6cf; }
+list.side row:selected { background:rgba(61,220,132,0.16); color:#eafff2; }
+.h2    { color:#eafff2; font-size:15px; font-weight:700; }
+.sub   { color:#84a594; font-size:11px; }
+.kv k  { color:#84a594; }
+button.act { background:rgba(61,220,132,0.12); border:1px solid rgba(61,220,132,0.40); border-radius:8px; color:#eafff2; padding:7px 14px; }
+button.act:hover { background:rgba(61,220,132,0.22); border-color:%(g)s; }
+button.danger { border-color:rgba(255,90,90,0.5); }
+button.danger:hover { background:rgba(255,90,90,0.18); border-color:#ff5a5a; }
+entry, .term { background:#050a07; color:#cfe9da; border:1px solid rgba(61,220,132,0.22); border-radius:8px; }
+.term { font-family:monospace; font-size:11px; padding:6px; }
+.mono { font-family:monospace; font-size:12px; color:#cfe9da; }
+""" % {"g": GREEN}).encode()
 
-def sh(c):
-    try: return subprocess.check_output(c, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception: return ""
 
-def term(cmd):
-    for t in ("konsole","xfce4-terminal","x-terminal-emulator","alacritty","xterm"):
-        if sh("command -v "+t):
-            f = "-x" if t == "xfce4-terminal" else "-e"
-            try: subprocess.Popen([t, f, "bash","-lc",cmd]); return
-            except Exception: pass
+def adb(*args, timeout=20):
+    try:
+        return subprocess.run(["adb", *args], capture_output=True, text=True, timeout=timeout).stdout.strip()
+    except Exception:
+        return ""
+
+def fastboot(*args, timeout=25):
+    try:
+        r = subprocess.run(["fastboot", *args], capture_output=True, text=True, timeout=timeout)
+        return (r.stdout + r.stderr).strip()
+    except Exception:
+        return ""
+
+def have(b):
+    return subprocess.run(["bash", "-lc", "command -v " + b], capture_output=True).returncode == 0
+
 
 class DroidB(Gtk.Window):
     def __init__(self):
-        super().__init__(title="droidB — Android Toolkit")
-        self.set_default_size(760, 600); self.set_resizable(False)
-        try: self.set_icon_from_file("/usr/share/droidB/droidB.png")
+        super().__init__(title="droidB - Android Toolkit")
+        self.set_default_size(940, 640); self.set_position(Gtk.WindowPosition.CENTER)
+        try: self.set_icon_name("phone")
         except Exception: pass
         p = Gtk.CssProvider(); p.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_USER)
+        self.logcat_proc = None
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        outer.set_halign(Gtk.Align.END); outer.set_valign(Gtk.Align.FILL)
-        self.add(outer)
-        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        panel.get_style_context().add_class("panel")
-        for m in ("set_margin_top","set_margin_bottom","set_margin_start","set_margin_end"): getattr(panel, m)(20)
-        panel.set_size_request(372, -1); panel.set_valign(Gtk.Align.FILL)
-        outer.pack_start(panel, True, True, 0)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # header
+        hb = Gtk.Box(spacing=12)
+        for m in ("set_margin_top","set_margin_bottom","set_margin_start","set_margin_end"): getattr(hb, m)(14)
+        t = Gtk.Label(); t.set_markup("<span font='22' weight='800'>droid<span foreground='%s'>B</span></span>" % GREEN)
+        t.get_style_context().add_class("title"); hb.pack_start(t, False, False, 0)
+        v = Gtk.Label(label="ARXOS ANDROID TOOLKIT  ·  v" + VERSION); v.get_style_context().add_class("ver")
+        v.set_valign(Gtk.Align.CENTER); hb.pack_start(v, False, False, 0)
+        self.dev = Gtk.Label(label="scanning..."); self.dev.get_style_context().add_class("dev")
+        self.dev.set_xalign(1); hb.pack_end(self.dev, True, True, 0)
+        root.pack_start(hb, False, False, 0)
+        root.pack_start(Gtk.Separator(), False, False, 0)
 
-        t = Gtk.Label(); t.set_markup("<span font='25' weight='800'>droid<span foreground='#3ddc84'>B</span></span>")
-        t.set_xalign(0); t.get_style_context().add_class("title"); panel.pack_start(t, False, False, 0)
-        s = Gtk.Label(label="ANDROID TOOLKIT  ·  ADB / FASTBOOT / FRIDA  ·  v" + VERSION); s.set_xalign(0)
-        s.get_style_context().add_class("sub"); panel.pack_start(s, False, False, 0)
+        body = Gtk.Box(spacing=0); root.pack_start(body, True, True, 0)
+        self.stack = Gtk.Stack(); self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        side = Gtk.StackSidebar(); side.set_stack(self.stack); side.set_size_request(168, -1)
+        side.get_style_context().add_class("side")
+        body.pack_start(side, False, False, 0)
+        body.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+        self.stack.set_margin_top(14); self.stack.set_margin_bottom(14)
+        self.stack.set_margin_start(16); self.stack.set_margin_end(16)
+        body.pack_start(self.stack, True, True, 0)
 
-        self.dev = Gtk.Label(label="○ scanning for device…"); self.dev.set_xalign(0)
-        self.dev.get_style_context().add_class("stat"); self.dev.set_margin_top(6)
-        panel.pack_start(self.dev, False, False, 0)
+        self.stack.add_titled(self._p_device(),   "device",   "Device")
+        self.stack.add_titled(self._p_apps(),     "apps",     "Apps")
+        self.stack.add_titled(self._p_logcat(),   "logcat",   "Logcat")
+        self.stack.add_titled(self._p_files(),    "files",    "Files")
+        self.stack.add_titled(self._p_screen(),   "screen",   "Screen")
+        self.stack.add_titled(self._p_fastboot(), "fastboot", "Fastboot")
+        self.stack.add_titled(self._p_shell(),    "shell",    "Shell")
+        self.stack.add_titled(self._p_flash(),    "flash",    "Flash")
 
-        grid = Gtk.Grid(column_spacing=10, row_spacing=10, column_homogeneous=True, row_homogeneous=True)
-        grid.set_margin_top(10); panel.pack_start(grid, True, True, 0)
-        cards = [
-            ("dialog-information","Device Info", self.devinfo),
-            ("user-trash","Debloater",     lambda *_: term("droidB")),
-            ("system-software-install","Apps", lambda *_: term("droidB")),
-            ("folder","Files",             lambda *_: term("droidB")),
-            ("drive-harddisk","Backup",    lambda *_: term("droidB")),
-            ("applications-engineering","Fastboot", lambda *_: term("droidB")),
-            ("phone","Samsung",            lambda *_: term("droidB")),
-            ("security-high","Security",   lambda *_: term("droidB")),
-            ("document-send","Install APK",self.installapk),
-        ]
-        for i,(ic,ti,cb) in enumerate(cards):
-            b = self._card(ic, ti); b.connect("clicked", cb); grid.attach(b, i % 3, i // 3, 1, 1)
+        self.add(root)
+        self._refresh(); GLib.timeout_add_seconds(3, self._refresh)
 
-        big = Gtk.Button(label="  Open full toolkit  "); big.get_style_context().add_class("card")
-        big.connect("clicked", lambda *_: term("droidB")); big.set_margin_top(4)
-        panel.pack_start(big, False, False, 0)
+    # ---- helpers ----
+    def _state(self):
+        return adb("get-state", timeout=4) or "offline"
 
-        self.refresh(); GLib.timeout_add_seconds(3, self.refresh)
+    def _refresh(self):
+        st = self._state(); c = self.dev.get_style_context()
+        c.remove_class("on"); c.remove_class("off")
+        if st == "device":
+            model = adb("shell", "getprop", "ro.product.model", timeout=4) or "device"
+            rel = adb("shell", "getprop", "ro.build.version.release", timeout=4)
+            self.dev.set_text("● %s · Android %s" % (model, rel)); c.add_class("on")
+        else:
+            self.dev.set_text("○ no device · enable USB debugging"); c.add_class("off")
+        return True
 
-    def _card(self, icon, title):
-        b = Gtk.Button(); b.get_style_context().add_class("card")
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        box.set_margin_top(13); box.set_margin_bottom(13)
-        img = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DND); img.set_pixel_size(24)
-        l = Gtk.Label(label=title); l.get_style_context().add_class("cardt")
-        box.pack_start(img, False, False, 0); box.pack_start(l, False, False, 0)
-        b.add(box); return b
-
-    def _adb(self): return sh("adb get-state 2>/dev/null")
-
-    def devinfo(self, *_):
-        if self._adb() != "device":
-            self._msg("No device", "Connect a device with USB debugging enabled."); return
-        info = sh("printf 'Model:   %s\\nBrand:   %s\\nAndroid: %s (API %s)\\nSerial:  %s\\nPatch:   %s' "
-                  "\"$(adb shell getprop ro.product.model)\" \"$(adb shell getprop ro.product.brand)\" "
-                  "\"$(adb shell getprop ro.build.version.release)\" \"$(adb shell getprop ro.build.version.sdk)\" "
-                  "\"$(adb get-serialno)\" \"$(adb shell getprop ro.build.version.security_patch)\"")
-        self._msg("Device", info or "could not read device")
-
-    def installapk(self, *_):
-        if self._adb() != "device":
-            self._msg("No device", "Connect a device first."); return
-        d = Gtk.FileChooserDialog(title="Select APK", parent=self, action=Gtk.FileChooserAction.OPEN)
-        d.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, "Install", Gtk.ResponseType.OK)
-        f = Gtk.FileFilter(); f.set_name("APK"); f.add_pattern("*.apk"); d.add_filter(f)
-        if d.run() == Gtk.ResponseType.OK:
-            apk = d.get_filename(); d.destroy()
-            term("echo 'Installing %s'; adb install -r '%s'; echo; read -rp 'enter…'" % (apk, apk))
-        else: d.destroy()
+    def _need_device(self):
+        if self._state() != "device":
+            self._msg("No device", "Connect a device with USB debugging enabled, then accept the prompt on the phone.")
+            return False
+        return True
 
     def _msg(self, title, body):
         m = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.INFO,
                               buttons=Gtk.ButtonsType.OK, text=title)
         m.format_secondary_text(body); m.run(); m.destroy()
 
-    def refresh(self):
-        st = self._adb(); c = self.dev.get_style_context()
-        c.remove_class("on"); c.remove_class("off")
-        if st == "device":
-            model = sh("adb shell getprop ro.product.model") or "device"
-            rel = sh("adb shell getprop ro.build.version.release")
-            self.dev.set_text("● %s  ·  Android %s" % (model, rel)); c.add_class("on")
-        else:
-            self.dev.set_text("○ no device connected"); c.add_class("off")
-        return True
+    def _confirm(self, title, body):
+        m = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                              buttons=Gtk.ButtonsType.OK_CANCEL, text=title)
+        m.format_secondary_text(body); r = m.run(); m.destroy()
+        return r == Gtk.ResponseType.OK
+
+    def _hdr(self, title, sub):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        h = Gtk.Label(label=title); h.set_xalign(0); h.get_style_context().add_class("h2")
+        s = Gtk.Label(label=sub); s.set_xalign(0); s.get_style_context().add_class("sub")
+        box.pack_start(h, False, False, 0); box.pack_start(s, False, False, 0)
+        return box
+
+    def _act(self, label, cb, danger=False):
+        b = Gtk.Button(label=label); b.get_style_context().add_class("act")
+        if danger: b.get_style_context().add_class("danger")
+        b.connect("clicked", cb); return b
+
+    def _scroller(self, child):
+        s = Gtk.ScrolledWindow(); s.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        s.add(child); return s
+
+    def _run_async(self, fn, done=None):
+        def work():
+            out = fn()
+            if done: GLib.idle_add(lambda: (done(out), False)[1])
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---- panels ----
+    def _p_device(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.pack_start(self._hdr("Device", "live state, properties and reboot"), False, False, 0)
+        self.dev_info = Gtk.Label(label="connect a device…"); self.dev_info.set_xalign(0)
+        self.dev_info.get_style_context().add_class("mono"); self.dev_info.set_selectable(True)
+        box.pack_start(self._scroller(self.dev_info), True, True, 0)
+        row = Gtk.Box(spacing=8)
+        row.pack_start(self._act("Refresh", lambda *_: self._load_devinfo()), False, False, 0)
+        self.reboot_to = Gtk.ComboBoxText()
+        for x in ("system","recovery","bootloader","fastboot","sideload"): self.reboot_to.append_text(x)
+        self.reboot_to.set_active(0); row.pack_start(self.reboot_to, False, False, 0)
+        row.pack_start(self._act("Reboot", self._reboot), False, False, 0)
+        box.pack_start(row, False, False, 0)
+        GLib.timeout_add(800, lambda: (self._load_devinfo(), False)[1])
+        return box
+
+    def _load_devinfo(self):
+        if self._state() != "device":
+            self.dev_info.set_text("no device connected."); return
+        self.dev_info.set_text("reading…")
+        def read():
+            g = lambda k: adb("shell", "getprop", k, timeout=5)
+            batt = adb("shell", "dumpsys", "battery", timeout=6)
+            lvl = next((l.split(":")[1].strip() for l in batt.splitlines() if "level" in l), "?")
+            store = adb("shell", "df", "-h", "/data", timeout=6).splitlines()
+            store = store[-1] if len(store) > 1 else ""
+            return ("Model     %s\nBrand     %s\nDevice    %s\nAndroid   %s  (API %s)\n"
+                    "Security  %s\nSoC       %s\nABI       %s\nSerial    %s\nBattery   %s%%\nStorage   %s") % (
+                g("ro.product.model"), g("ro.product.brand"), g("ro.product.device"),
+                g("ro.build.version.release"), g("ro.build.version.sdk"),
+                g("ro.build.version.security_patch"), g("ro.board.platform") or g("ro.hardware"),
+                g("ro.product.cpu.abi"), adb("get-serialno", timeout=4), lvl,
+                " ".join(store.split()[1:5]) if store else "?")
+        self._run_async(read, self.dev_info.set_text)
+
+    def _reboot(self, *_):
+        if self._state() not in ("device",): self._msg("No device", "No device connected."); return
+        mode = self.reboot_to.get_active_text()
+        self._run_async(lambda: adb("reboot", "" if mode == "system" else mode))
+
+    def _p_apps(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.pack_start(self._hdr("Apps", "installed packages - uninstall, disable, clear, install"), False, False, 0)
+        top = Gtk.Box(spacing=8)
+        self.app_filter = Gtk.SearchEntry(); self.app_filter.set_placeholder_text("filter packages…")
+        self.app_filter.connect("search-changed", lambda *_: self.app_store.refilter())
+        top.pack_start(self.app_filter, True, True, 0)
+        self.app_user_only = Gtk.CheckButton(label="user apps only"); self.app_user_only.set_active(True)
+        self.app_user_only.connect("toggled", lambda *_: self._load_apps())
+        top.pack_start(self.app_user_only, False, False, 0)
+        top.pack_start(self._act("Reload", lambda *_: self._load_apps()), False, False, 0)
+        top.pack_start(self._act("Install APK…", self._install_apk), False, False, 0)
+        box.pack_start(top, False, False, 0)
+        self.app_store = Gtk.ListStore(str)
+        self.app_filt = self.app_store.filter_new()
+        self.app_filt.set_visible_func(lambda m, it, _: (self.app_filter.get_text().lower() in (m[it][0] or "").lower()))
+        self.app_view = Gtk.TreeView(model=self.app_filt)
+        self.app_view.append_column(Gtk.TreeViewColumn("Package", Gtk.CellRendererText(), text=0))
+        box.pack_start(self._scroller(self.app_view), True, True, 0)
+        act = Gtk.Box(spacing=8)
+        act.pack_start(self._act("Uninstall", lambda *_: self._app_act("uninstall"), danger=True), False, False, 0)
+        act.pack_start(self._act("Disable", lambda *_: self._app_act("disable")), False, False, 0)
+        act.pack_start(self._act("Enable", lambda *_: self._app_act("enable")), False, False, 0)
+        act.pack_start(self._act("Clear data", lambda *_: self._app_act("clear"), danger=True), False, False, 0)
+        box.pack_start(act, False, False, 0)
+        GLib.timeout_add(900, lambda: (self._load_apps(), False)[1])
+        return box
+
+    def _load_apps(self):
+        if self._state() != "device": return
+        self.app_store.clear()
+        flag = "-3" if self.app_user_only.get_active() else ""
+        def read():
+            out = adb("shell", "pm", "list", "packages", flag, timeout=15) if flag else adb("shell", "pm", "list", "packages", timeout=15)
+            return sorted(l.replace("package:", "").strip() for l in out.splitlines() if l.strip())
+        def fill(pkgs):
+            for p in pkgs: self.app_store.append([p])
+        self._run_async(read, fill)
+
+    def _app_sel(self):
+        m, it = self.app_view.get_selection().get_selected()
+        return m[it][0] if it else None
+
+    def _app_act(self, what):
+        pkg = self._app_sel()
+        if not pkg: self._msg("Select an app", "Pick a package from the list first."); return
+        if what in ("uninstall", "clear") and not self._confirm(what.title() + " " + pkg, "This affects the device immediately. Continue?"):
+            return
+        cmds = {"uninstall": ["uninstall", pkg], "clear": ["shell", "pm", "clear", pkg],
+                "disable": ["shell", "pm", "disable-user", "--user", "0", pkg],
+                "enable": ["shell", "pm", "enable", pkg]}
+        def run():
+            r = adb(*cmds[what]); GLib.idle_add(self._load_apps); return r
+        self._run_async(run, lambda r: self._msg(what.title(), r or "done"))
+
+    def _install_apk(self, *_):
+        if not self._need_device(): return
+        d = Gtk.FileChooserDialog(title="Select APK", parent=self, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Install", Gtk.ResponseType.OK)
+        ff = Gtk.FileFilter(); ff.set_name("APK"); ff.add_pattern("*.apk"); d.add_filter(ff)
+        if d.run() == Gtk.ResponseType.OK:
+            apk = d.get_filename(); d.destroy()
+            self._run_async(lambda: adb("install", "-r", apk, timeout=180),
+                            lambda r: (self._msg("Install APK", r or "done"), self._load_apps()))
+        else: d.destroy()
+
+    def _p_logcat(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.pack_start(self._hdr("Logcat", "live device log - filter, pause, clear"), False, False, 0)
+        top = Gtk.Box(spacing=8)
+        self.lc_filter = Gtk.SearchEntry(); self.lc_filter.set_placeholder_text("filter (tag or text)…")
+        top.pack_start(self.lc_filter, True, True, 0)
+        self.lc_btn = self._act("Start", self._logcat_toggle); top.pack_start(self.lc_btn, False, False, 0)
+        top.pack_start(self._act("Clear", lambda *_: (self.lc_buf.set_text(""), adb("logcat", "-c"))), False, False, 0)
+        box.pack_start(top, False, False, 0)
+        self.lc_view = Gtk.TextView(); self.lc_view.set_editable(False); self.lc_view.set_monospace(True)
+        self.lc_view.get_style_context().add_class("term"); self.lc_buf = self.lc_view.get_buffer()
+        box.pack_start(self._scroller(self.lc_view), True, True, 0)
+        return box
+
+    def _logcat_toggle(self, *_):
+        if self.logcat_proc:
+            try: self.logcat_proc.terminate()
+            except Exception: pass
+            self.logcat_proc = None; self.lc_btn.set_label("Start"); return
+        if not self._need_device(): return
+        self.lc_btn.set_label("Stop")
+        try:
+            self.logcat_proc = subprocess.Popen(["adb", "logcat", "-v", "brief"],
+                                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        except Exception as e:
+            self._msg("logcat", str(e)); self.lc_btn.set_label("Start"); return
+        def pump():
+            for line in self.logcat_proc.stdout:
+                flt = self.lc_filter.get_text()
+                if flt and flt.lower() not in line.lower(): continue
+                GLib.idle_add(self._lc_append, line)
+        threading.Thread(target=pump, daemon=True).start()
+
+    def _lc_append(self, line):
+        end = self.lc_buf.get_end_iter(); self.lc_buf.insert(end, line)
+        if self.lc_buf.get_line_count() > 2000:  # cap
+            s = self.lc_buf.get_start_iter(); e = self.lc_buf.get_iter_at_line(500); self.lc_buf.delete(s, e)
+        self.lc_view.scroll_to_mark(self.lc_buf.get_insert(), 0, False, 0, 0)
+        return False
+
+    def _p_files(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.pack_start(self._hdr("Files", "push to / pull from the device"), False, False, 0)
+        r1 = Gtk.Box(spacing=8)
+        r1.pack_start(Gtk.Label(label="Remote path"), False, False, 0)
+        self.f_remote = Gtk.Entry(); self.f_remote.set_text("/sdcard/")
+        r1.pack_start(self.f_remote, True, True, 0)
+        box.pack_start(r1, False, False, 0)
+        r2 = Gtk.Box(spacing=8)
+        r2.pack_start(self._act("Push file…", self._push), False, False, 0)
+        r2.pack_start(self._act("Pull to…", self._pull), False, False, 0)
+        r2.pack_start(self._act("List", lambda *_: self._run_async(
+            lambda: adb("shell", "ls", "-la", self.f_remote.get_text(), timeout=10), self.f_out.set_text)), False, False, 0)
+        box.pack_start(r2, False, False, 0)
+        self.f_out = Gtk.Label(label=""); self.f_out.set_xalign(0); self.f_out.get_style_context().add_class("mono")
+        self.f_out.set_selectable(True)
+        box.pack_start(self._scroller(self.f_out), True, True, 0)
+        return box
+
+    def _push(self, *_):
+        if not self._need_device(): return
+        d = Gtk.FileChooserDialog(title="File to push", parent=self, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Push", Gtk.ResponseType.OK)
+        if d.run() == Gtk.ResponseType.OK:
+            src = d.get_filename(); d.destroy()
+            self._run_async(lambda: adb("push", src, self.f_remote.get_text(), timeout=300), self.f_out.set_text)
+        else: d.destroy()
+
+    def _pull(self, *_):
+        if not self._need_device(): return
+        d = Gtk.FileChooserDialog(title="Pull into folder", parent=self, action=Gtk.FileChooserAction.SELECT_FOLDER)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Pull", Gtk.ResponseType.OK)
+        if d.run() == Gtk.ResponseType.OK:
+            dst = d.get_filename(); d.destroy()
+            self._run_async(lambda: adb("pull", self.f_remote.get_text(), dst, timeout=300), self.f_out.set_text)
+        else: d.destroy()
+
+    def _p_screen(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.pack_start(self._hdr("Screen", "screenshot, record, and live mirror"), False, False, 0)
+        r = Gtk.Box(spacing=8)
+        r.pack_start(self._act("Screenshot", self._screenshot), False, False, 0)
+        r.pack_start(self._act("Record 10s", self._screenrecord), False, False, 0)
+        r.pack_start(self._act("Mirror (scrcpy)", self._mirror), False, False, 0)
+        box.pack_start(r, False, False, 0)
+        self.scr_out = Gtk.Label(label="screenshots + recordings save to ~/droidB"); self.scr_out.set_xalign(0)
+        self.scr_out.get_style_context().add_class("sub")
+        box.pack_start(self.scr_out, False, False, 0)
+        self.scr_img = Gtk.Image()
+        box.pack_start(self._scroller(self.scr_img), True, True, 0)
+        return box
+
+    def _outdir(self):
+        d = os.path.expanduser("~/droidB"); os.makedirs(d, exist_ok=True); return d
+
+    def _screenshot(self, *_):
+        if not self._need_device(): return
+        path = os.path.join(self._outdir(), "shot-%d.png" % int(time.time()))
+        def run():
+            try:
+                with open(path, "wb") as f:
+                    subprocess.run(["adb", "exec-out", "screencap", "-p"], stdout=f, timeout=20)
+                return path
+            except Exception as e: return str(e)
+        def done(p):
+            self.scr_out.set_text("saved " + p)
+            if os.path.exists(p): self.scr_img.set_from_file(p)
+        self._run_async(run, done)
+
+    def _screenrecord(self, *_):
+        if not self._need_device(): return
+        rp = "/sdcard/droidB-rec.mp4"; lp = os.path.join(self._outdir(), "rec-%d.mp4" % int(time.time()))
+        self.scr_out.set_text("recording 10s…")
+        def run():
+            adb("shell", "screenrecord", "--time-limit", "10", rp, timeout=20)
+            adb("pull", rp, lp, timeout=60); adb("shell", "rm", rp)
+            return "saved " + lp
+        self._run_async(run, self.scr_out.set_text)
+
+    def _mirror(self, *_):
+        if not self._need_device(): return
+        if not have("scrcpy"):
+            if self._confirm("scrcpy not installed", "Install scrcpy now (arx install scrcpy)?"):
+                subprocess.Popen(["xfce4-terminal", "-x", "bash", "-lc", "arx install scrcpy; read -rp 'enter…'"])
+            return
+        subprocess.Popen(["scrcpy"])
+
+    def _p_fastboot(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.pack_start(self._hdr("Fastboot", "bootloader operations - reboot, flash, unlock"), False, False, 0)
+        box.pack_start(self._act("Detect (fastboot devices)", lambda *_: self._run_async(
+            lambda: fastboot("devices") or "no fastboot device", self.fb_out.set_text)), False, False, 0)
+        r = Gtk.Box(spacing=8)
+        for m in ("system", "bootloader", "recovery"):
+            r.pack_start(self._act("reboot " + m, lambda _b, mm=m: self._run_async(
+                lambda: fastboot("reboot") if mm == "system" else fastboot("reboot", mm), self.fb_out.set_text)), False, False, 0)
+        box.pack_start(r, False, False, 0)
+        r2 = Gtk.Box(spacing=8)
+        r2.pack_start(Gtk.Label(label="partition"), False, False, 0)
+        self.fb_part = Gtk.Entry(); self.fb_part.set_placeholder_text("boot / recovery / system…")
+        r2.pack_start(self.fb_part, True, True, 0)
+        r2.pack_start(self._act("Flash img…", self._fb_flash, danger=True), False, False, 0)
+        box.pack_start(r2, False, False, 0)
+        r3 = Gtk.Box(spacing=8)
+        r3.pack_start(self._act("Unlock", lambda *_: self._run_async(lambda: fastboot("flashing", "unlock"), self.fb_out.set_text), danger=True), False, False, 0)
+        r3.pack_start(self._act("Lock", lambda *_: self._run_async(lambda: fastboot("flashing", "lock"), self.fb_out.set_text)), False, False, 0)
+        box.pack_start(r3, False, False, 0)
+        self.fb_out = Gtk.Label(label="put the device in fastboot mode (Device → Reboot → bootloader)")
+        self.fb_out.set_xalign(0); self.fb_out.get_style_context().add_class("mono"); self.fb_out.set_selectable(True)
+        box.pack_start(self._scroller(self.fb_out), True, True, 0)
+        return box
+
+    def _fb_flash(self, *_):
+        part = self.fb_part.get_text().strip()
+        if not part: self._msg("Partition?", "Enter the partition (e.g. boot)."); return
+        d = Gtk.FileChooserDialog(title="Image to flash", parent=self, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Flash", Gtk.ResponseType.OK)
+        ff = Gtk.FileFilter(); ff.set_name("image"); ff.add_pattern("*.img"); d.add_filter(ff)
+        if d.run() == Gtk.ResponseType.OK:
+            img = d.get_filename(); d.destroy()
+            if self._confirm("Flash %s" % part, "Flash %s to '%s'? This can brick the device." % (os.path.basename(img), part)):
+                self._run_async(lambda: fastboot("flash", part, img, timeout=300), self.fb_out.set_text)
+        else: d.destroy()
+
+    def _p_shell(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.pack_start(self._hdr("Shell", "run adb shell commands, see output"), False, False, 0)
+        self.sh_out = Gtk.TextView(); self.sh_out.set_editable(False); self.sh_out.set_monospace(True)
+        self.sh_out.get_style_context().add_class("term"); self.sh_buf = self.sh_out.get_buffer()
+        box.pack_start(self._scroller(self.sh_out), True, True, 0)
+        r = Gtk.Box(spacing=8)
+        self.sh_in = Gtk.Entry(); self.sh_in.set_placeholder_text("adb shell  <command>   e.g. getprop ro.product.model")
+        self.sh_in.connect("activate", self._sh_run)
+        r.pack_start(self.sh_in, True, True, 0)
+        r.pack_start(self._act("Run", self._sh_run), False, False, 0)
+        box.pack_start(r, False, False, 0)
+        return box
+
+    def _sh_run(self, *_):
+        cmd = self.sh_in.get_text().strip()
+        if not cmd: return
+        if not self._need_device(): return
+        self.sh_buf.insert(self.sh_buf.get_end_iter(), "$ adb shell %s\n" % cmd)
+        self.sh_in.set_text("")
+        self._run_async(lambda: adb("shell", *shlex.split(cmd), timeout=30),
+                        lambda o: (self.sh_buf.insert(self.sh_buf.get_end_iter(), (o or "") + "\n\n"),
+                                   self.sh_out.scroll_to_mark(self.sh_buf.get_insert(), 0, False, 0, 0)))
+
+    def _p_flash(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.pack_start(self._hdr("Flash", "vendor flashing - MediaTek (mtkclient) and Samsung (Heimdall/Odin)"), False, False, 0)
+        mtk = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        mtk.pack_start(Gtk.Label(label="MediaTek (BROM/Preloader via mtkclient)", xalign=0), False, False, 0)
+        mr = Gtk.Box(spacing=8)
+        mr.pack_start(self._act("Read info", lambda *_: self._vendor("mtk", "printgpt")), False, False, 0)
+        mr.pack_start(self._act("Backup (readflash)", lambda *_: self._vendor("mtk", "rl " + self._outdir())), False, False, 0)
+        mr.pack_start(self._act("Flash partition…", lambda *_: self._vendor_flash("mtk")), False, False, 0)
+        mtk.pack_start(mr, False, False, 0)
+        box.pack_start(mtk, False, False, 0)
+        box.pack_start(Gtk.Separator(), False, False, 0)
+        sam = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        sam.pack_start(Gtk.Label(label="Samsung (Download mode via Heimdall)", xalign=0), False, False, 0)
+        sr = Gtk.Box(spacing=8)
+        sr.pack_start(self._act("Detect (print-pit)", lambda *_: self._vendor("heimdall", "print-pit")), False, False, 0)
+        sr.pack_start(self._act("Flash partition…", lambda *_: self._vendor_flash("heimdall")), False, False, 0)
+        sam.pack_start(sr, False, False, 0)
+        box.pack_start(sam, False, False, 0)
+        self.fl_out = Gtk.Label(label="MediaTek: hold Vol-keys + plug in (BROM). Samsung: boot into Download mode.")
+        self.fl_out.set_xalign(0); self.fl_out.get_style_context().add_class("mono"); self.fl_out.set_selectable(True)
+        box.pack_start(self._scroller(self.fl_out), True, True, 0)
+        return box
+
+    def _vendor_tool(self, kind):
+        # returns the command base, installing the tool on demand via a terminal
+        tool = "mtk" if kind == "mtk" else "heimdall"
+        pkg = "mtkclient" if kind == "mtk" else "heimdall"
+        if not have(tool):
+            if self._confirm(tool + " not installed", "Install %s now?" % pkg):
+                subprocess.Popen(["xfce4-terminal", "-x", "bash", "-lc", "arx install %s; read -rp 'enter…'" % pkg])
+            return None
+        return tool
+
+    def _vendor(self, kind, args):
+        tool = self._vendor_tool(kind)
+        if not tool: return
+        self.fl_out.set_text("running %s %s … (watch the terminal)" % (tool, args))
+        # vendor flashing is long + interactive -> run in a terminal so the user sees prompts
+        subprocess.Popen(["xfce4-terminal", "--title", "droidB · " + tool, "-x", "bash", "-lc",
+                          "%s %s; echo; read -rp 'done - enter to close…'" % (tool, args)])
+
+    def _vendor_flash(self, kind):
+        tool = self._vendor_tool(kind)
+        if not tool: return
+        part = ""
+        if kind == "heimdall":
+            dlg = Gtk.Dialog(title="Partition name", transient_for=self, modal=True)
+            dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Next", Gtk.ResponseType.OK)
+            e = Gtk.Entry(); e.set_placeholder_text("BOOT / RECOVERY / SYSTEM"); dlg.get_content_area().add(e); dlg.show_all()
+            if dlg.run() != Gtk.ResponseType.OK: dlg.destroy(); return
+            part = e.get_text().strip(); dlg.destroy()
+        d = Gtk.FileChooserDialog(title="Image to flash", parent=self, action=Gtk.FileChooserAction.OPEN)
+        d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Flash", Gtk.ResponseType.OK)
+        if d.run() != Gtk.ResponseType.OK: d.destroy(); return
+        img = d.get_filename(); d.destroy()
+        if not self._confirm("Flash via %s" % tool, "Flashing can brick the device. Continue?"): return
+        cmd = ("mtk w %s '%s'" % (part or "boot", img)) if kind == "mtk" else ("heimdall flash --%s '%s'" % (part, img))
+        subprocess.Popen(["xfce4-terminal", "--title", "droidB · flash", "-x", "bash", "-lc",
+                          "%s; echo; read -rp 'done - enter to close…'" % cmd])
+
 
 if __name__ == "__main__":
     if "--version" in sys.argv or "-V" in sys.argv:
